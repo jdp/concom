@@ -78,4 +78,5 @@ Inspiration & Code
 Copyright &copy; 2010 Justin Poliey
 [justinpoliey.com](http://justinpoliey.com)
 [@justinpoliey](http://twitter.com/justinpoliey)
+[Exploring Concatenative Combinators](http://tumble.justinpoliey.com/post/314824535/exploring-concatenative-combinators) &mdash; the blog post
 
