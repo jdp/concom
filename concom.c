@@ -318,7 +318,7 @@ struct object *quotation_eval(struct interpreter *i) {
 				}
 				w = lookup(i, SYMBOL(q->items[j])->string);
 				if (w == NULL) {
-					error(0, "error: %d: unknown word `%s'\n", SYMBOL(q->items[j])->line, SYMBOL(q->items[j])->string);
+					runtime_error("unknown word `%s'", SYMBOL(q->items[j])->string);
 					return NIL;
 				}
 				if (call(i, w, SYMBOL(q->items[j])->line) == NIL) {
