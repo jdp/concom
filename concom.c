@@ -8,6 +8,8 @@
 #include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #define MAX_SIZET ((size_t)(~(size_t)0)-2)
 
@@ -613,13 +615,14 @@ int main(int argc, char **argv) {
 	struct object *o;
 	init(&p, &i);
 	if (argc == 1) {
+		char *prompt = ">>> ";
+		char *line = NULL;
 		while (1) {
-			char line[1024];
-			printf(">>> ");
-			fflush(stdout);
-			if (fgets(line, 1024, stdin) == NULL) {
-				return 0;
+			line = readline(prompt);
+			if (line == NULL) {
+				break;
 			}
+			add_history(line);
 			p.source = line;
 			o = parse(&p, &i);
 			if (o == NIL) continue;
