@@ -128,7 +128,15 @@ void error(int fatal, const char *format, ...) {
 
 #define fatal(FMT,ARGS...)         (error(1, "fatal: " #FMT "\n", ##ARGS));
 #define parse_error(L,FMT,ARGS...) ({i->done = 1; error(0, "parse error: %d: " #FMT "\n", L, ##ARGS);})
-#define runtime_error(FMT,ARGS...) ({i->done = 1; error(0, "runtime error: %d: %s: " #FMT "\n", i->frame->line, i->frame->word, ##ARGS);})
+#define runtime_error(FMT,ARGS...) ({ \
+	struct call_frame *cf = i->frame;; \
+	i->done = 1; \
+	error(0, "runtime error: " #FMT "\n", ##ARGS); \
+	while (cf != NULL) { \
+		printf("called from %d: inside `%s'\n", cf->line, cf->word); \
+		cf = cf->next; \
+	} \
+})
 
 int scan(struct parser *p) {
 	if (current(p) == T_INIT) {
@@ -220,6 +228,7 @@ struct word *lookup(struct interpreter *i, char *name) {
 
 struct object *quotation_eval(struct interpreter *);
 struct object *call(struct interpreter *i, struct word *w, int line) {
+	struct object *result;
 	struct call_frame *frame;
 	if ((frame = (struct call_frame *)malloc(sizeof(struct call_frame))) == NULL) {
 		fatal("out of memory to add call frame");
@@ -229,12 +238,16 @@ struct object *call(struct interpreter *i, struct word *w, int line) {
 	frame->next = i->frame;
 	i->frame = frame;
 	if (w->fn != NULL) {
-		return (w->fn(i) == CC_ERR) ? NIL : peek(i);
+		result = (w->fn(i) == CC_ERR) ? NIL : peek(i);
 	}
 	else {
 		push(i, w->quote);
-		return (quotation_eval(i) == NIL) ? NIL : peek(i);
+		result = (quotation_eval(i) == NIL) ? NIL : peek(i);
 	}
+	frame = i->frame;
+	i->frame = i->frame->next;
+	free(frame);
+	return result;
 }
 
 struct object *symbol_new(struct interpreter *i, char *string, int frozen) {
