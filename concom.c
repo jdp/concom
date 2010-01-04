@@ -185,7 +185,7 @@ int scan(struct parser *p) {
 						return T_WORD;
 					}
 				}
-				error(1, "syntax error: %d: unrecognized input `%c' 0x%X\n", p->line, current(p), current(p));
+				error(0, "syntax error: %d: unrecognized input `%c' 0x%X\n", p->line, current(p), current(p));
 				return T_EOF;
 		}
 	}
