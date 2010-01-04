@@ -11,14 +11,14 @@
 
 #define MAX_SIZET ((size_t)(~(size_t)0)-2)
 
+enum { CC_ERR, CC_OK };
 enum { T_INIT = -2, T_EOF, T_EOL, T_WORD, T_SYMBOL, T_BQUOTE, T_EQUOTE, T_BDEF, T_EDEF };
 enum { O_SYMBOL, O_NUMBER, O_QUOTATION };
 
 struct object;
 struct interpreter;
 
-typedef struct object *(*wordfn_t)(struct interpreter *i);
-typedef wordfn_t wordfn;
+typedef int (*wordfn)(struct interpreter *i);
 
 #define OBJ_HEADER int type; int line;
 	
@@ -38,6 +38,10 @@ struct quotation {
 	struct object **items;
 };
 
+#define OBJECT(o)    ((struct object *)(o))
+#define SYMBOL(o)    ((struct symbol *)(o))
+#define QUOTATION(o) ((struct quotation *)(o))
+
 struct parser {
 	char *source;
 	int line;
@@ -52,11 +56,18 @@ struct word {
 	struct word *next;
 };
 
+struct call_frame {
+	int line;
+	char *word;
+	struct call_frame *next;
+};
+
 struct interpreter {
 	int line, done;
 	size_t top, cap;
 	struct object **stack;
 	struct word *words;
+	struct call_frame *frame;
 };
 
 #define next(p)    (p->c = *p->source++)
@@ -68,17 +79,17 @@ static int save(struct parser *p, int c) {
 	if (p->bufused + 1 >= p->bufsize) {
 		size_t newsize;
 		if (p->bufsize >= MAX_SIZET/2) {
-			return 0;
+			return CC_ERR;
 		}
 		newsize = p->bufsize * 2;
 		p->buffer = (char *)realloc(p->buffer, sizeof(char) * newsize);
 		if (p->buffer == NULL) {
-			return 0;
+			return CC_ERR;
 		}
 		p->bufsize = newsize;
 	}
 	p->buffer[p->bufused++] = (char)c;
-	return 1;
+	return CC_OK;
 }
 
 static void scan_comment(struct parser *p) {
@@ -115,9 +126,9 @@ void error(int fatal, const char *format, ...) {
   	}
 }
 
-#define fatal(FMT,ARGS...)           (error(1, "fatal: " #FMT "\n", ##ARGS));
-#define parse_error(L,FMT,ARGS...)   ({i->done = 1; error(0, "parse error: %d: " #FMT "\n", L, ##ARGS);})
-#define runtime_error(L,FMT,ARGS...) ({i->done = 1; error(0, "runtime error: %d: " #FMT "\n", L, ##ARGS);})
+#define fatal(FMT,ARGS...)         (error(1, "fatal: " #FMT "\n", ##ARGS));
+#define parse_error(L,FMT,ARGS...) ({i->done = 1; error(0, "parse error: %d: " #FMT "\n", L, ##ARGS);})
+#define runtime_error(FMT,ARGS...) ({i->done = 1; error(0, "runtime error: %d: %s: " #FMT "\n", i->frame->line, i->frame->word, ##ARGS);})
 
 int scan(struct parser *p) {
 	if (current(p) == T_INIT) {
@@ -181,42 +192,49 @@ struct word *lookup(struct interpreter *i, char *name) {
 	return NULL;
 }
 
-int push(struct interpreter *i, struct object *item) {
-	if ((i->top + 1) >= i->cap) {
-		i->cap *= 2;
-		i->stack = (struct object **)realloc(i->stack, sizeof(struct object *) * i->cap);
-		if (i->stack == NULL) {
-			fatal("not enough memory to grow stack\n");
-		}
-	}
-	i->stack[(i->top)++] = item;
-	return 1;
-}
-
 #define NIL ((struct object *)0)
 
-struct object *peek(struct interpreter *i) {
-	return i->stack[i->top-1];
-}
+#define push(i, o) ({ \
+	if (((i)->top + 1) >= (i)->cap) { \
+		(i)->cap *= 2; \
+		(i)->stack = (struct object **)realloc((i)->stack, sizeof(struct object *) * (i)->cap); \
+		if ((i)->stack == NULL) { \
+			fatal("not enough memory to grow stack"); \
+			return CC_ERR; \
+		} \
+	} \
+	(i)->stack[((i)->top)++] = (struct object *)(o); \
+})
 
-struct object *pop(struct interpreter *i) {
-	if (i->top <= 0) {
-		runtime_error(i->line, "stack underflow");
-		return NIL;
-	}
-	return i->stack[--(i->top)];
-}
+#define pop(i) ({ \
+	if ((i)->top <= 0) { \
+		runtime_error("stack underflow"); \
+		return CC_ERR; \
+	} \
+	(i)->stack[--((i)->top)]; \
+})
+
+#define peek(i) ({ \
+	(i)->stack[(i)->top-1]; \
+})
 
 struct object *quotation_eval(struct interpreter *);
-struct object *call(struct interpreter *i, struct word *w) {
+struct object *call(struct interpreter *i, struct word *w, int line) {
+	struct call_frame *frame;
+	if ((frame = (struct call_frame *)malloc(sizeof(struct call_frame))) == NULL) {
+		fatal("out of memory to add call frame");
+	}
+	frame->line = line;
+	frame->word = w->name;
+	frame->next = i->frame;
+	i->frame = frame;
 	if (w->fn != NULL) {
-		w->fn(i);
+		return (w->fn(i) == CC_ERR) ? NIL : peek(i);
 	}
 	else {
-		push(i, (struct object *)w->quote);
-		quotation_eval(i);
+		push(i, w->quote);
+		return (quotation_eval(i) == NIL) ? NIL : peek(i);
 	}
-	return peek(i);
 }
 
 struct object *symbol_new(struct interpreter *i, char *string, int frozen) {
@@ -229,7 +247,7 @@ struct object *symbol_new(struct interpreter *i, char *string, int frozen) {
 	s->type = O_SYMBOL;
 	s->string = strdup(string);
 	s->frozen = frozen;
-	push(i, (struct object *)s);
+	push(i, s);
 	return (struct object *)s;
 }
 
@@ -244,7 +262,7 @@ struct object *quotation_new(struct interpreter *i) {
 	q->size = 0;
 	q->cap = 8;
 	q->items = (struct object **)malloc(sizeof(struct object *) * q->cap);
-	push(i, (struct object *)q);
+	push(i, q);
 	return (struct object *)q;
 }
 
@@ -254,7 +272,7 @@ struct object *quotation_append(struct interpreter *i) {
 	o = pop(i);
 	q = (struct quotation *)pop(i);
 	if (q->type != O_QUOTATION) {
-		runtime_error(i->line, "can't append to a non-quotation object");
+		runtime_error(i->frame->line, "can't append to a non-quotation object");
 		return NIL;
 	}
 	if ((q->size + 1) >= q->cap) {
@@ -275,7 +293,7 @@ struct object *quotation_eval(struct interpreter *i) {
 	struct word *w;
 	q = (struct quotation *)pop(i);
 	if (q->type != O_QUOTATION) {
-		runtime_error(i->line, "can't evaluate a non-quotation object");
+		runtime_error("can't evaluate a non-quotation object");
 		return NIL;
 	}
 	for (j = 0; j < q->size; j++) {
@@ -285,12 +303,14 @@ struct object *quotation_eval(struct interpreter *i) {
 					push(i, q->items[j]);
 					break;
 				}
-				w = lookup(i, ((struct symbol *)q->items[j])->string);
+				w = lookup(i, SYMBOL(q->items[j])->string);
 				if (w == NULL) {
-					runtime_error(((struct symbol *)q->items[j])->line, "unknown word `%s'", ((struct symbol *)q->items[j])->string);
+					error(0, "error: %d: unknown word `%s'\n", SYMBOL(q->items[j])->line, SYMBOL(q->items[j])->string);
 					return NIL;
 				}
-				call(i, w);
+				if (call(i, w, SYMBOL(q->items[j])->line) == NIL) {
+					return NIL;
+				}
 				break;
 			case O_QUOTATION:
 				push(i, q->items[j]);
@@ -393,24 +413,44 @@ void tree(struct object *o, int depth) {
 	}
 }
 
-struct object *show(struct interpreter *i) {
+#define expect(i, v, t) ( \
+	v = pop(i); \
+	if ((v)->type != O_##t) { \
+		runtime_error("quotation expected"); \
+		return CC_ERR; \
+	})
+
+int show_word(struct interpreter *i) {
 	int j;
 	printf("%d: ", i->top);
 	for (j = 0; j < i->top; j++) {
 		tree(i->stack[j], 0);
 	}
 	printf("\n");
-	return NIL;
+	return CC_OK;
 }
 
-struct object *empty(struct interpreter *i) {
+int zap_word(struct interpreter *i) {
+	if (i->top <= 0) {
+		runtime_error("stack empty");
+		return CC_ERR;
+	}
+	pop(i);
+	return CC_OK;
+}
+
+int empty_word(struct interpreter *i) {
 	i->top = 0;
-	return NIL;
+	return CC_OK;
 }
 
-struct object *dup(struct interpreter *i) {
+int dup_word(struct interpreter *i) {
 	struct object *o;
 	struct quotation *q;
+	if (i->top <= 0) {
+		runtime_error("stack empty");
+		return CC_ERR;
+	}
 	o = peek(i);
 	switch (o->type) {
 		case O_QUOTATION:
@@ -424,79 +464,108 @@ struct object *dup(struct interpreter *i) {
 				fatal("out of memory to duplicate quotation");
 			}
 			memcpy(q->items, ((struct quotation *)o)->items, sizeof(struct object *) * q->cap);
-			push(i, (struct object *)q);
+			push(i, q);
 			break;
 		default:
 			push(i, o);
 			break;
 	}
-	return NIL;
+	return CC_OK;
 }
 
-struct object *swap(struct interpreter *i) {
+int swap_word(struct interpreter *i) {
 	struct object *a, *b;
 	a = pop(i);
 	b = pop(i);
 	push(i, a);
 	push(i, b);
-	return NIL;
+	return CC_OK;
 }
 
-struct object *cat(struct interpreter *i) {
+int cat_word(struct interpreter *i) {
 	int j;
-	struct quotation *q;
-	q = (struct quotation *)pop(i);
-	if (q->type != O_QUOTATION) {
-		runtime_error(i->line, "cat: quotation expected");
-		return NIL;
-	}
-	for (j = 0; j < q->size; j++) {
-		push(i, q->items[j]);
-		quotation_append(i);
-	}
-	return NIL;
-}
-
-struct object *cons(struct interpreter *i) {
 	struct object *a, *b;
 	a = pop(i);
 	if (a->type != O_QUOTATION) {
-		runtime_error(i->line, "cons: quotation expected");
-		return NIL;
+		push(i, a);
+		runtime_error("quotation expected");
+		return CC_ERR;
+	}
+	b = pop(i);
+	if (b->type != O_QUOTATION) {
+		push(i, b);
+		runtime_error("quotation expected");
+		return CC_ERR;
+	}
+	push(i, b);
+	for (j = 0; j < QUOTATION(a)->size; j++) {
+		push(i, QUOTATION(a)->items[j]);
+		quotation_append(i);
+	}
+	return CC_OK;
+}
+
+int cons_word(struct interpreter *i) {
+	int j;
+	struct object *a, *b;
+	a = pop(i);
+	if (a->type != O_QUOTATION) {
+		push(i, a);
+		runtime_error("quotation expected");
+		return CC_ERR;
 	}
 	b = pop(i);
 	quotation_new(i);
 	push(i, b);
 	quotation_append(i);
-	push(i, a);
-	cat(i);
-	return peek(i);
+	for (j = 0; j < QUOTATION(a)->size; j++) {
+		push(i, QUOTATION(a)->items[j]);
+		quotation_append(i);
+	}
+	return CC_OK;
 }
 
-struct object *dip(struct interpreter *i) {
+int i_word(struct interpreter *i) {
+	struct object *a;
+	a = pop(i);
+	if (a->type != O_QUOTATION) {
+		push(i, a);
+		runtime_error("quotation expected");
+		return CC_ERR;
+	}
+	push(i, a);
+	quotation_eval(i);
+	return CC_OK;
+}
+
+int dip_word(struct interpreter *i) {
 	struct object *a, *b;
 	a = pop(i);
 	if (a->type != O_QUOTATION) {
-		runtime_error(i->line, "dip: quotation expected");
-		return NIL;
+		push(i, a);
+		runtime_error("quotation expected");
+		return CC_ERR;
 	}
 	b = pop(i);
 	push(i, a);
 	quotation_eval(i);
 	push(i, b);
-	return peek(i);
+	return CC_OK;
 }
 
-struct object *unit(struct interpreter *i) {
+int unit_word(struct interpreter *i) {
+	struct object *a;
+	a = pop(i);
 	quotation_new(i);
-	cons(i);
-	return peek(i);
+	push(i, a);
+	quotation_append(i);
+	return CC_OK;
 }
 
-struct object *quit(struct interpreter *i) {
+int quit_word(struct interpreter *i) {
 	i->done = 1;
 	exit(0);
-	return NIL;
+	return CC_OK;
 }
 
 void init(struct parser *p, struct interpreter *i) {
@@ -511,17 +580,18 @@ void init(struct parser *p, struct interpreter *i) {
 		fatal("out of memory to allocate stack");
 	}
 	i->words = NULL;
-	builtin("zap",   pop);
-	builtin("empty", empty);
-	builtin("i",     quotation_eval);
-	builtin("unit",  unit);
-	builtin("dup",   dup);
-	builtin("cat",   cat);
-	builtin("swap",  swap);
-	builtin("cons",  cons);
-	builtin("dip",   dip);
-	builtin("show",  show);
-	builtin("exit",  quit);
+	i->frame = NULL;
+	builtin("zap",   zap_word);
+	builtin("empty", empty_word);
+	builtin("i",     i_word);
+	builtin("unit",  unit_word);
+	builtin("dup",   dup_word);
+	builtin("cat",   cat_word);
+	builtin("swap",  swap_word);
+	builtin("cons",  cons_word);
+	builtin("dip",   dip_word);
+	builtin("show",  show_word);
+	builtin("exit",  quit_word);
 }
 
 int main(int argc, char **argv) {
@@ -545,7 +615,7 @@ int main(int argc, char **argv) {
 			}
 			else {
 				quotation_eval(&i);
-				show(&i);
+				show_word(&i);
 			}
 			i.done = 0;
 			p.c = T_INIT;
@@ -568,7 +638,7 @@ int main(int argc, char **argv) {
 		}
 		else {
 			quotation_eval(&i);
-			show(&i);
+			show_word(&i);
 		}
     }
 	return 0;
