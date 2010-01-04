@@ -14,7 +14,7 @@
 #define MAX_SIZET ((size_t)(~(size_t)0)-2)
 
 enum { CC_ERR, CC_OK };
-enum { T_INIT = -2, T_EOF, T_EOL, T_WORD, T_SYMBOL, T_BQUOTE, T_EQUOTE, T_BDEF, T_EDEF };
+enum { T_INIT = -2, T_EOF, T_EOL, T_WORD, T_SYMBOL, T_BQUOTE, T_EQUOTE, T_BDEF, T_EDEF, T_ERR };
 enum { O_SYMBOL, O_NUMBER, O_QUOTATION };
 
 struct object;
@@ -72,10 +72,10 @@ struct interpreter {
 	struct call_frame *frame;
 };
 
-#define next(p)    (p->c = *p->source++)
-#define reset(p)   (p->bufused = 0)
-#define current(p) (p->c)
-#define token(p)   (p->buffer)
+#define next(p)    ((p)->c = *(p)->source++)
+#define reset(p)   ((p)->bufused = 0)
+#define current(p) ((p)->c)
+#define token(p)   ((p)->buffer)
 
 static int save(struct parser *p, int c) {
 	if (p->bufused + 1 >= p->bufsize) {
@@ -129,10 +129,10 @@ void error(int fatal, const char *format, ...) {
 }
 
 #define fatal(FMT,ARGS...)         (error(1, "fatal: " #FMT "\n", ##ARGS));
-#define parse_error(L,FMT,ARGS...) ({i->done = 1; error(0, "parse error: %d: " #FMT "\n", L, ##ARGS);})
+#define parse_error(L,FMT,ARGS...) ({(i)->done = 1; error(0, "parse error: %d: " #FMT "\n", L, ##ARGS);})
 #define runtime_error(FMT,ARGS...) ({ \
-	struct call_frame *cf = i->frame;; \
-	i->done = 1; \
+	struct call_frame *cf = (i)->frame;; \
+	(i)->done = 1; \
 	error(0, "runtime error: " #FMT "\n", ##ARGS); \
 	while (cf != NULL) { \
 		printf("called from %d: inside `%s'\n", cf->line, cf->word); \
@@ -186,7 +186,7 @@ int scan(struct parser *p) {
 					}
 				}
 				error(0, "syntax error: %d: unrecognized input `%c' 0x%X\n", p->line, current(p), current(p));
-				return T_EOF;
+				return T_ERR;
 		}
 	}
 }
@@ -404,7 +404,7 @@ struct object *parse(struct parser *p, struct interpreter *i) {
 				i->line++;
 				break;
 			case T_EOF:
-				return NIL;
+			case T_ERR:
 			default:
 				return NIL;
 		}
@@ -584,6 +584,7 @@ int quit_word(struct interpreter *i) {
 }
 
 void init(struct parser *p, struct interpreter *i) {
+	p->line = 1;
 	p->c = T_INIT;
 	p->buffer = NULL;
 	p->bufused = 0;
@@ -625,16 +626,22 @@ int main(int argc, char **argv) {
 			add_history(line);
 			p.source = line;
 			o = parse(&p, &i);
-			if (o == NIL) continue;
+			if (o == NIL) {
+				i.top--;
+				goto whoops;
+			}
 			if (o->type != O_QUOTATION) {
-				error(0, "invalid parse\n");
+				i.top--;
 			}
 			else {
 				quotation_eval(&i);
 				show_word(&i);
 			}
+			whoops:
 			i.done = 0;
 			p.c = T_INIT;
+			p.line = 1;
+			reset(&p);
 		}
 	}
 	else if (argc == 2) {
